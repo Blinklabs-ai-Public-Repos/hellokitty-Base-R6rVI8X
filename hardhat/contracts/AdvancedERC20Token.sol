@@ -3,19 +3,25 @@ pragma solidity ^0.8.9;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
-import "@openzeppelin/contracts/token/ERC20/extensions/draft-ERC20Permit.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/draft-ERC20Permit.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Snapshot.sol";
 import "@openzeppelin/contracts/utils/Multicall.sol";
 import "@openzeppelin/contracts/finance/VestingWallet.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
  * @title AdvancedERC20Token
- * @dev An advanced ERC20 token with multisend, gasless transactions, pausable functionality, and token vesting.
+ * @dev This contract implements an ERC20 token with additional features:
+ * - Multisend (inherits from OpenZeppelin Multicall)
+ * - Gasless transactions (inherits from OpenZeppelin ERC20Permit)
+ * - Burn functionality (inherits from OpenZeppelin ERC20Burnable)
+ * - Pausable functionality (inherits from OpenZeppelin ERC20Pausable)
+ * - Token Vesting (using OpenZeppelin VestingWallet)
+ * - Snapshot functionality (inherits from OpenZeppelin ERC20Snapshot)
  */
-contract AdvancedERC20Token is ERC20, ERC20Burnable, ERC20Permit, ERC20Pausable, Multicall, Ownable {
+contract AdvancedERC20Token is ERC20, ERC20Burnable, ERC20Pausable, ERC20Permit, ERC20Snapshot, Multicall {
     uint256 private immutable _maxSupply;
-    mapping(address => VestingWallet) private _vestingWallets;
+    mapping(address => address) private _vestingWallets;
 
     /**
      * @dev Constructor to initialize the token with name, symbol, and max supply.
@@ -27,33 +33,9 @@ contract AdvancedERC20Token is ERC20, ERC20Burnable, ERC20Permit, ERC20Pausable,
         ERC20(name_, symbol_)
         ERC20Permit(name_)
     {
-        require(maxSupply_ > 0, "AdvancedERC20Token: Max supply must be greater than zero");
+        require(maxSupply_ > 0, "Max supply must be greater than zero");
         _maxSupply = maxSupply_;
-        _mint(_msgSender(), maxSupply_);
-    }
-
-    /**
-     * @dev Returns the maximum supply of tokens.
-     * @return The maximum supply of tokens.
-     */
-    function maxSupply() public view returns (uint256) {
-        return _maxSupply;
-    }
-
-    /**
-     * @dev Pauses all token transfers.
-     * @notice Can only be called by the contract owner.
-     */
-    function pause() public onlyOwner {
-        _pause();
-    }
-
-    /**
-     * @dev Unpauses all token transfers.
-     * @notice Can only be called by the contract owner.
-     */
-    function unpause() public onlyOwner {
-        _unpause();
+        _mint(msg.sender, maxSupply_);
     }
 
     /**
@@ -62,41 +44,67 @@ contract AdvancedERC20Token is ERC20, ERC20Burnable, ERC20Permit, ERC20Pausable,
      * @param amount The amount of tokens to be vested.
      * @param duration The duration of the vesting period in seconds.
      */
-    function createVestingSchedule(address beneficiary, uint256 amount, uint64 duration) public onlyOwner {
-        require(beneficiary != address(0), "AdvancedERC20Token: Invalid beneficiary address");
-        require(amount > 0, "AdvancedERC20Token: Vesting amount must be greater than zero");
-        require(duration > 0, "AdvancedERC20Token: Vesting duration must be greater than zero");
-        require(address(_vestingWallets[beneficiary]) == address(0), "AdvancedERC20Token: Vesting schedule already exists for beneficiary");
-
+    function createVestingSchedule(address beneficiary, uint256 amount, uint64 duration) external {
+        require(beneficiary != address(0), "Beneficiary cannot be zero address");
+        require(amount > 0, "Vesting amount must be greater than zero");
+        require(duration > 0, "Vesting duration must be greater than zero");
+        require(balanceOf(msg.sender) >= amount, "Insufficient balance for vesting");
+        require(_vestingWallets[beneficiary] == address(0), "Vesting schedule already exists for beneficiary");
+        
         VestingWallet newVestingWallet = new VestingWallet(
             beneficiary,
             uint64(block.timestamp),
             duration
         );
-
-        _vestingWallets[beneficiary] = newVestingWallet;
-        _transfer(_msgSender(), address(newVestingWallet), amount);
+        
+        _vestingWallets[beneficiary] = address(newVestingWallet);
+        _transfer(msg.sender, address(newVestingWallet), amount);
     }
 
     /**
-     * @dev Returns the vesting wallet address for a given beneficiary.
-     * @param beneficiary The address of the beneficiary.
-     * @return The address of the vesting wallet.
+     * @dev Releases vested tokens for the caller.
      */
-    function getVestingWallet(address beneficiary) public view returns (address) {
-        return address(_vestingWallets[beneficiary]);
+    function releaseVestedTokens() external {
+        address vestingWalletAddress = _vestingWallets[msg.sender];
+        require(vestingWalletAddress != address(0), "No vesting schedule found");
+        
+        VestingWallet vestingWallet = VestingWallet(payable(vestingWalletAddress));
+        vestingWallet.release(address(this));
     }
 
     /**
-     * @dev Hook that is called before any transfer of tokens.
+     * @dev Creates a new snapshot of the current token state.
+     * @return The id of the newly created snapshot.
+     */
+    function snapshot() external returns (uint256) {
+        return _snapshot();
+    }
+
+    /**
+     * @dev Returns the maximum supply of the token.
+     * @return The maximum supply.
+     */
+    function maxSupply() public view returns (uint256) {
+        return _maxSupply;
+    }
+
+    /**
+     * @dev Internal function to update token state before any token transfer.
      * @param from The address tokens are transferred from.
      * @param to The address tokens are transferred to.
-     * @param amount The amount of tokens to be transferred.
+     * @param amount The amount of tokens transferred.
      */
     function _beforeTokenTransfer(address from, address to, uint256 amount)
         internal
-        override(ERC20, ERC20Pausable)
+        override(ERC20, ERC20Pausable, ERC20Snapshot)
     {
         super._beforeTokenTransfer(from, to, amount);
     }
+
+    /**
+     * @dev This empty reserved space is put in place to allow future versions to add new
+     * variables without shifting down storage in the inheritance chain.
+     * See https://docs.openzeppelin.com/contracts/4.x/upgradeable#storage_gaps
+     */
+    uint256[50] private __gap;
 }
